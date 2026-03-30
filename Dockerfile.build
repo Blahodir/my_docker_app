@@ -1,0 +1,144 @@
+# explicitly use Debian for maximum cross-architecture compatibility
+FROM debian:trixie-slim
+
+RUN set -eux; \
+	dpkgArch="$(dpkg --print-architecture)"; \
+	apt-get install --update -y --no-install-recommends \
+		ca-certificates \
+		sq \
+		wget \
+		\
+		gcc \
+		libc6-dev \
+		make \
+		\
+# these are all "arch:all" so we can just install all of them
+		libc6-dev-amd64-cross \
+		libc6-dev-arm64-cross \
+		libc6-dev-armel-cross \
+		libc6-dev-armhf-cross \
+		libc6-dev-i386-cross \
+		libc6-dev-mips64el-cross \
+		libc6-dev-ppc64el-cross \
+		libc6-dev-riscv64-cross \
+		libc6-dev-s390x-cross \
+		\
+# the cross-compilers are particular about which architectures they build for, so for now we'll only support a host architecture of amd64 or arm64
+		$([ "$dpkgArch" = 'amd64' ] || echo 'gcc-x86-64-linux-gnu') \
+		$([ "$dpkgArch" = 'arm64' ] || echo 'gcc-aarch64-linux-gnu') \
+		gcc-arm-linux-gnueabi \
+		gcc-arm-linux-gnueabihf \
+		gcc-i686-linux-gnu \
+		gcc-mips64el-linux-gnuabi64 \
+		gcc-powerpc64le-linux-gnu \
+		gcc-riscv64-linux-gnu \
+		gcc-s390x-linux-gnu \
+		\
+		arch-test \
+		file \
+		patch \
+	; \
+	apt-get dist-clean
+
+# https://musl.libc.org/releases.html
+ENV MUSL_VERSION 1.2.6
+RUN set -eux; \
+# > Since 1.1.7, releases are signed with the project GPG key. Its fingerprint is 8364 8929 0BB6 B70F 99FF DA05 56BC DB59 3020 450F.
+	muslKey='8364 8929 0BB6 B70F 99FF DA05 56BC DB59 3020 450F'; \
+#
+# Error: No binding signature at time 2025-08-12T23:23:25Z
+# because: Policy rejected non-revocation signature (PositiveCertification) requiring second pre-image resistance
+# because: SHA1 is not considered secure since 2023-02-01T00:00:00Z
+#
+# and then:
+#
+# Error: Policy rejected non-revocation signature (Binary) requiring collision resistance
+# because: SHA1 is not considered secure since 2013-02-01T00:00:00Z
+# 0 authenticated signatures, 1 bad signature.
+#
+	sq='sq --policy-as-of 2013-01-01T00:00:00Z'; \
+	$sq network search "$muslKey"; \
+	$sq pki link add --cert "$muslKey" --userid 'musl libc <musl@libc.org>'; \
+	$sq download \
+		--output 'musl.tgz' \
+		--url "https://musl.libc.org/releases/musl-$MUSL_VERSION.tar.gz" \
+		--signature-url "https://musl.libc.org/releases/musl-$MUSL_VERSION.tar.gz.asc" \
+		--signer "$muslKey" \
+	; \
+	\
+	mkdir /usr/local/src/musl; \
+	tar --extract --file musl.tgz --directory /usr/local/src/musl --strip-components 1; \
+	rm musl.tgz
+
+WORKDIR /usr/src/hello
+COPY . .
+
+# https://bugs.debian.org/1050429: error: unrecognized command-line option '-EL' (on mips64le specifically/only)
+RUN patch --input="$PWD/musl-gcc-mips64le.patch" /usr/local/src/musl/tools/musl-gcc.specs.sh
+
+# the following steps are grouped into "architecture families" and roughly ordered in a descending compatibility way such that we end up with the most accurate ".host-arch" symlink we can reasonably get
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='amd64' \
+		CROSS_COMPILE='x86_64-linux-gnu-' \
+		ARCH_TEST='amd64'
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='i386' \
+		CROSS_COMPILE='i686-linux-gnu-' \
+		ARCH_TEST='i386'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='arm64v8' \
+		CROSS_COMPILE='aarch64-linux-gnu-' \
+		ARCH_TEST='arm64'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='arm32v7' \
+		CROSS_COMPILE='arm-linux-gnueabihf-' \
+#		EXTRA_CFLAGS='-march=armv7-a+fp' \
+		ARCH_TEST='armhf'
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='arm32v6' \
+		CROSS_COMPILE='arm-linux-gnueabi-' \
+		EXTRA_CFLAGS='-march=armv6+fp' \
+		ARCH_TEST='armhf'
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='arm32v5' \
+		CROSS_COMPILE='arm-linux-gnueabi-' \
+#		EXTRA_CFLAGS='-march=armv5te' \
+		ARCH_TEST='armel'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='mips64le' \
+		CROSS_COMPILE='mips64el-linux-gnuabi64-' \
+		ARCH_TEST='mips64el'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='ppc64le' \
+		CROSS_COMPILE='powerpc64le-linux-gnu-' \
+		EXTRA_CFLAGS='-mlong-double-64' \
+		ARCH_TEST='ppc64el'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='riscv64' \
+		CROSS_COMPILE='riscv64-linux-gnu-' \
+		ARCH_TEST='riscv64'
+
+RUN set -ex; \
+	make clean all test \
+		TARGET_ARCH='s390x' \
+		CROSS_COMPILE='s390x-linux-gnu-' \
+		ARCH_TEST='s390x'
+
+RUN find \( -name 'hello' -or -name 'hello.txt' -or -name '.host-arch' \) -exec file '{}' + -exec ls -lh '{}' +
+
+CMD [".host-arch/hello"]
